@@ -17,6 +17,19 @@ const result = {
 const payload = { version: 1, result, exitCode: 0 };
 const ok = () => ({ ok: true, status: 200, json: async () => payload });
 
+test('remote dry-run accepts formatted output and rejects oversized output with the correct label', async () => {
+  const output = [];
+  const connection = { execute: async () => {}, query: async () => {}, close: async () => {} };
+  await require('../src/dry-run').dryRun({ connectOracle: async () => connection, connectDb2: async () => connection,
+    log: text => output.push({ stream: 'stdout', text }) });
+  const result = { passed: true, output };
+  const client = createRemoteClient({ env, fetchImpl: async () => ({ ok: true, status: 200,
+    json: async () => ({ version: 1, exitCode: 0, result }) }) });
+  assert.deepEqual(await client.execute('dryRun'), result);
+  result.output = Array.from({ length: 33 }, () => ({ stream: 'stdout', text: '' }));
+  await assert.rejects(client.execute('dryRun'), /invalid dry-run response/);
+});
+
 test('execution mode defaults to local without needing remote or database settings', () => {
   assert.equal(getExecutionMode({}), 'local');
   assert.equal(getExecutionMode({ FEEDER_MODE: 'local' }), 'local');

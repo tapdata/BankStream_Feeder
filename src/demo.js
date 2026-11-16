@@ -11,7 +11,18 @@ async function main() {
   if (getExecutionMode() === 'remote') {
     if (mode === 'dry-run') {
       const result = await require('./remote-client').createRemoteClient().execute('dryRun');
-      for (const line of result.output) (line.stream === 'stderr' ? console.error : console.log)(line.text);
+      for (const line of result.output) {
+        const isError = line.stream === 'stderr';
+        const stream = isError ? process.stderr : process.stdout;
+        let text = line.text;
+        if (stream.isTTY && !('NO_COLOR' in process.env) && !text.includes('\x1b[')) {
+          const color = isError || /\[FAIL\]|FAILED/.test(text) ? '31'
+            : /\[PASS\]|connection: OK|^Result:.*passed/.test(text) ? '1;32'
+            : /^BankStream/.test(text) ? '1;36' : '90';
+          text = `\x1b[${color}m${text}\x1b[0m`;
+        }
+        (isError ? console.error : console.log)(text);
+      }
       if (!result.passed) process.exitCode = 1;
       return;
     }

@@ -47,7 +47,7 @@ function validResult(operation, data, resetOperation = 'both') {
   if (operation === 'kycReset') return typeof data?.changed === 'boolean' && typeof data.passed === 'boolean' && kyc(data.final);
   if (operation === 'verify') return typeof data?.passed === 'boolean' && ['transaction', 'kyc', 'api'].some(key => data[key]) &&
     ['transaction', 'kyc', 'api'].every(key => !data[key] || typeof data[key].passed === 'boolean');
-  if (operation === 'dryRun') return typeof data?.passed === 'boolean' && Array.isArray(data.output) && data.output.length <= 8 &&
+  if (operation === 'dryRun') return typeof data?.passed === 'boolean' && Array.isArray(data.output) && data.output.length <= 32 &&
     data.output.every(line => ['stdout', 'stderr'].includes(line.stream) && typeof line.text === 'string' && line.text.length < 1024);
   if (operation === 'status') return validStatus(data);
   if (operation === 'transactionPreview') {
@@ -161,7 +161,7 @@ function createRemoteClient({ env = process.env, fetchImpl } = {}) {
       catch { throw new Error('Demo Control Service returned an invalid response'); }
       const exitCode = payload?.result?.passed === false ? 1 : 0;
       if (payload?.version !== 1 || payload.exitCode !== exitCode || !validResult(operation, payload.result, input.operation)) {
-        const label = operation.startsWith('realtime') ? 'realtime' : operation === 'status' ? 'status' : operation.startsWith('transaction') ? 'transaction' : operation === 'verify' ? 'verification' : 'KYC';
+        const label = operation.startsWith('realtime') ? 'realtime' : operation === 'dryRun' ? 'dry-run' : operation === 'status' ? 'status' : operation.startsWith('transaction') ? 'transaction' : operation === 'verify' ? 'verification' : 'KYC';
         throw new Error(`Demo Control Service returned an invalid ${label} response`);
       }
       return payload.result;
