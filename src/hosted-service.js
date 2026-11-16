@@ -30,13 +30,17 @@ function createHostedService(settings, { connections, fetchImpl } = {}) {
     }))),
     reset: (_preview, operation = 'both') => require('./demo-reset').createDemoReset(options).run({
       withDb2: action => withDb('db2', action), withOracle: action => withDb('oracle', action)
-    }, operation).then(report => {
+    }, operation, true).then(report => {
       // Driver messages can contain SQL and connection details; do not expose them remotely.
       for (const part of ['kyc', 'account']) if (report[part] && !report[part].passed) report[part].error = 'Reset failed or outcome uncertain; operator reconciliation required';
       return report;
     }),
-    status: () => withDb('db2', db2 => withDb('oracle', oracle => demo.status(db2, oracle))),
-    preview: () => withDb('db2', db2 => demo.readWithdrawalAccount(db2)),
+    status: () => {
+      const { withSource } = require('./status-output');
+      return withSource(() => drivers().connectDb2(config), 'AS400', db2 =>
+        withSource(() => drivers().connectOracle(config), 'Oracle', oracle => demo.status(db2, oracle, true)));
+    },
+    preview: () => withDb('db2', db2 => demo.readWithdrawalAccount(db2, true)),
     realtime: async (options, execution) => {
       validateHostedRealtimeOptions(options, config.limits);
       const realtimeConfig = { ...config, retryLimit: 0 };
@@ -48,16 +52,19 @@ function createHostedService(settings, { connections, fetchImpl } = {}) {
       if (execution.signal.aborted) return null;
       return withDb('db2', db2 => withDb('oracle', oracle => runner.realtime(db2, oracle, options)));
     },
-    kycPreview: () => withDb('oracle', oracle => demo.currentKyc(oracle)),
-    kyc: expected => withDb('oracle', oracle => demo.setKyc(oracle, expected)),
+    kycPreview: (detailed = false) => withDb('oracle', oracle => detailed
+      ? require('./kyc-output').observe(oracle, connection => demo.currentKyc(connection)) : demo.currentKyc(oracle)),
+    kyc: (expected, detailed = false) => withDb('oracle', oracle => detailed
+      ? require('./kyc-output').observe(oracle, connection => demo.setKyc(connection, expected)) : demo.setKyc(oracle, expected)),
     kycReset: expected => withDb('oracle', async oracle => {
       const reset = await demo.resetKyc(oracle, expected);
       const final = await demo.currentKyc(oracle);
       return { ...reset, final, passed: final.status === 'VERIFIED' && final.riskRating === 'LOW' };
     }),
     verify: async options => {
-      const report = await runVerification({ service: demo, withDb2: action => withDb('db2', action),
-        withOracle: action => withDb('oracle', action), env: config.tapdata || {}, fetchImpl: async (url, options) => {
+      const { withSource } = require('./status-output');
+      const report = await runVerification({ service: demo, withDb2: action => withSource(() => drivers().connectDb2(config), 'AS400', action),
+        withOracle: action => withSource(() => drivers().connectOracle(config), 'Oracle', action), env: config.tapdata || {}, fetchImpl: async (url, options) => {
           const response = await (fetchImpl || globalThis.fetch)(url, { ...options, redirect: 'error' });
           return { ok: response.ok, status: response.status, json: () => readJson(response) };
         } }, options);
@@ -73,7 +80,7 @@ function createHostedService(settings, { connections, fetchImpl } = {}) {
       catch { passed = false; }
       return { output, passed };
     },
-    transaction: (amount, { transactionUuid, referenceUuid }) => {
+    transaction: (amount, { transactionUuid, referenceUuid, expectedCurrency }) => {
       // Preallocate identifiers for audit/reconciliation without changing withdrawal logic.
       const ids = [transactionUuid, referenceUuid];
       const operation = createDemoService({ ...options, makeId: () => {
@@ -81,7 +88,14 @@ function createHostedService(settings, { connections, fetchImpl } = {}) {
         if (!id) throw new Error('Missing hosted transaction identifier');
         return id;
       } });
-      return withDb('db2', db2 => operation.transaction(db2, amount));
+      return withDb('db2', db2 => operation.transaction(db2, amount, true, expectedCurrency)).catch(error => {
+        // Preserve the public uncertain-commit error contract: no SQL or assignment details.
+        // The failed commit step and rollback uncertainty can still be presented safely.
+        const detail = error.withdrawalExecution;
+        if (detail?.commitAttempted) error.withdrawalExecution = { ...detail,
+          events: detail.events.filter(event => event.operation !== 'query') };
+        throw error;
+      });
     }
   };
 }

@@ -1,5 +1,5 @@
 'use strict';
-const { createTapDataVerifier, printReport } = require('./tapdata-api-verification');
+const { createTapDataVerifier } = require('./tapdata-api-verification');
 
 function validateVerificationOptions({ stage, transactionId } = {}) {
   if (stage !== undefined && !['transaction', 'kyc', 'api'].includes(stage)) throw new Error('Verification stage must be transaction, kyc, or api; combined verification is available without a stage');
@@ -20,6 +20,9 @@ async function runVerification({ service, withDb2, withOracle, env, fetchImpl },
   const { stage, transactionId } = validateVerificationOptions(options);
   const report = {};
   async function run(db2, oracle) {
+    const { connection } = require('./verification-output');
+    db2 = connection(db2, 'AS400');
+    oracle = connection(oracle, 'Oracle');
     if (!stage || stage === 'transaction') report.transaction = await service.verifyTransaction(db2, transactionId);
     if (!stage || stage === 'kyc') report.kyc = await service.verifyKyc(oracle);
     if (!stage || stage === 'api') {
@@ -31,7 +34,8 @@ async function runVerification({ service, withDb2, withOracle, env, fetchImpl },
           return source;
         }, { transactionId });
         report.api = { result, source, passed: result.passed };
-      } catch (error) { report.api = { passed: false, error: error.message }; }
+      } catch (error) { report.api = { passed: false, error: error.message,
+        ...(['AS400', 'Oracle'].includes(error.sourceSystem) ? { sourceSystem: error.sourceSystem } : {}) }; }
     }
   }
   if (stage === 'transaction') await withDb2(db => run(db));
@@ -42,31 +46,7 @@ async function runVerification({ service, withDb2, withOracle, env, fetchImpl },
 }
 
 function printVerification(report) {
-  if (report.transaction) printTransactionVerification(report.transaction);
-  if (report.kyc) {
-    const result = report.kyc;
-    console.log(`KYC customer ${result.customerId}: ${result.status} / ${result.riskRating ?? 'N/A'} — ${result.retrieved ? 'RETRIEVED' : 'NOT RETRIEVED'}, ${result.expectedState} — ${result.passed ? 'PASS' : 'FAIL'}`);
-  }
-  if (report.api?.source) printReport(report.api.result, report.api.source);
-  else if (report.api) console.log(`TapData API verification: FAIL (${report.api.error})`);
-}
-
-function printTransactionVerification(result) {
-  console.log(`Selected by: ${result.selectedBy}`);
-  if (result.transaction) {
-    const row = result.transaction;
-    console.log(`Transaction ID: ${String(row.TRANSACTION_ID).trim()}`);
-    console.log(`Amount: ${row.TRANSACTION_AMOUNT} ${String(row.CURRENCY).trim()}`);
-    console.log(`Type / stage / status: ${String(row.TRANSACTION_TYPE).trim()} / ${String(row.TRANSACTION_STAGE).trim()} / ${String(row.TRANSACTION_STATUS).trim()}`);
-    console.log(`Timestamp: ${String(row.TRANSACTION_TIMESTAMP).trim()}`);
-  } else console.log('Transaction: NOT FOUND');
-  console.log(`Customer/account relationship: ${result.relationshipValid ? 'PASS' : 'FAIL'}`);
-  console.log(`Completed posted GBP withdrawal: ${result.transactionValid ? 'PASS' : 'FAIL'}`);
-  if (result.selectedBy !== 'exact transaction ID') console.log(`Latest transaction remained stable: ${result.stableSelection ? 'PASS' : 'FAIL'}`);
-  if (result.account) console.log(`Current DB2 balance: ${result.account.BALANCE} ${result.account.CURRENCY} / available ${result.account.AVAILABLE_BALANCE}`);
-  else console.log('Current database account: NOT FOUND');
-  console.log(`Source account remained stable during verification: ${result.stableAccount ? 'PASS' : 'FAIL'}`);
-  console.log(`Transaction verification: ${result.passed ? 'PASS' : 'FAIL'}`);
+  require('./verification-output').render(report);
 }
 
 module.exports = { runVerification, parseVerificationArgs, validateVerificationOptions, printVerification };

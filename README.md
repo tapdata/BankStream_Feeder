@@ -87,6 +87,7 @@ Partners complete these steps. Import files are in `tapdata_tasks/`.
 Before running `npm run demo:status`, `npm run demo:transaction`, or the other demo commands, confirm that the required TapData tasks have completed their initial synchronization, CDC tasks are running, and the Customer 360 and KYC APIs are published and accessible.
 
 ```bash
+npm test
 npm run dry-run
 npm run demo:status
 ```
@@ -129,6 +130,7 @@ Partners complete these steps. Import files are in `tapdata_tasks/`.
 
 ```bash
 npm run doctor
+npm test
 npm run dry-run
 npm run demo:status
 ```

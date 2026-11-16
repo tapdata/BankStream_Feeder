@@ -5,19 +5,20 @@ const { createDemoService } = require('../src/customer360-demo');
 function relationship(state) {
   return { CUSTOMER_ID: '100002', CUSTOMER_NAME: 'Demo Customer', CUSTOMER_STATUS: 'ACTIVE', OWNERSHIP_ROLE: 'PRIMARY',
     EFFECTIVE_FROM: '2020-01-01', EFFECTIVE_TO: null, ACCOUNT_ID: 'AC1000021', ACCOUNT_NUMBER: '••••0001', ACCOUNT_TYPE: 'CHECKING',
-    CURRENCY: 'GBP', ACCOUNT_STATUS: 'ACTIVE', BALANCE: state.balance, AVAILABLE_BALANCE: state.available };
+    CURRENCY: state.currency, ACCOUNT_STATUS: 'ACTIVE', BALANCE: state.balance, AVAILABLE_BALANCE: state.available };
 }
 
-function db2Mock({ balance = 4381, available = balance } = {}) {
-  const state = { balance, available, transactions: [], pending: null, snapshot: null, commits: 0, rollbacks: 0, queries: [] };
+function db2Mock({ balance = 4381, available = balance, currency = 'GBP' } = {}) {
+  const state = { balance, available, currency, transactions: [], pending: null, snapshot: null, commits: 0, rollbacks: 0, queries: [], boundQueries: [] };
   return { state, close: async () => {},
     beginTransaction: async () => { state.snapshot = { balance: state.balance, available: state.available, length: state.transactions.length }; },
     commit: async () => { if (state.pending) state.transactions.push(state.pending); state.pending = null; state.snapshot = null; state.commits++; },
     rollback: async () => { if (state.snapshot) { state.balance = state.snapshot.balance; state.available = state.snapshot.available; state.transactions.length = state.snapshot.length; } state.pending = null; state.snapshot = null; state.rollbacks++; },
     query: async (sql, binds = []) => {
       state.queries.push(sql);
+      state.boundQueries.push({ sql, binds });
       if (sql.includes('JOIN BANKCORE.ACCOUNT_CUSTOMER_RELATIONSHIP')) return [relationship(state)];
-      if (sql.includes('FROM BANKCORE.BANK_ACCOUNT WHERE ACCOUNT_ID=? FOR UPDATE')) return [{ ACCOUNT_ID: 'AC1000021', CURRENCY: 'GBP', ACCOUNT_STATUS: 'ACTIVE', BALANCE: state.balance, AVAILABLE_BALANCE: state.available }];
+      if (sql.includes('FROM BANKCORE.BANK_ACCOUNT WHERE ACCOUNT_ID=? FOR UPDATE')) return [{ ACCOUNT_ID: 'AC1000021', CURRENCY: state.currency, ACCOUNT_STATUS: 'ACTIVE', BALANCE: state.balance, AVAILABLE_BALANCE: state.available }];
       if (sql.startsWith('INSERT INTO BANKCORE.ACCOUNT_TRANSACTION')) {
         state.pending = { TRANSACTION_ID: binds[0], ACCOUNT_ID: binds[1], TRANSACTION_TYPE: 'WITHDRAWAL', TRANSACTION_STAGE: 'POSTED', TRANSACTION_STATUS: 'COMPLETED', TRANSACTION_AMOUNT: binds[2], CURRENCY: binds[3], TRANSACTION_TIMESTAMP: '2026-10-27 12:00:00', COUNTERPARTY_REFERENCE: binds[4] };
         return { count: 1 };
@@ -328,8 +329,47 @@ test('KYC command guards against state changing after the confirmation preview',
   assert.equal(oracle.state.updates, 0);
 });
 
-test('configured withdrawal amount accepts a positive GBP value with two decimal precision', () => {
-  assert.doesNotThrow(() => demo({ amount: '17.25' }));
+test('configured withdrawal supports AUD, USD and GBP with two decimal precision', () => {
+  for (const currency of ['AUD', 'USD', 'GBP']) assert.doesNotThrow(() => demo({ amount: '17.25', currency }));
   assert.throws(() => demo({ amount: '0' }), /greater than zero/);
-  assert.throws(() => demo({ currency: 'USD' }), /currency must be GBP/);
+  assert.throws(() => demo({ currency: 'EUR' }), /currency must be AUD, USD, or GBP/);
+});
+
+for (const currency of ['AUD', 'USD', 'GBP']) {
+  test(`withdrawal uses the ${currency} account currency in SQL and results`, async () => {
+    const db = db2Mock({ balance: 1000, available: 900, currency });
+    const result = await demo().transaction(db, '12.50', false, currency);
+    assert.equal(result.currency, currency);
+    assert.equal(result.newBalance, '987.50');
+    assert.equal(result.newAvailableBalance, '887.50');
+    assert.equal(db.state.transactions[0].CURRENCY, currency);
+    assert.equal(db.state.boundQueries.find(row => row.sql.startsWith('UPDATE BANKCORE.BANK_ACCOUNT')).binds[3], currency);
+    assert.equal(db.state.commits, 1);
+    const verified = await demo().verifyTransaction(db, result.transactionId);
+    assert.equal(verified.passed, true);
+    const sources = await demo().readApiVerificationSources(db, oracleMock(), result.transactionId);
+    assert.equal(sources.transactionValid, true);
+    assert.equal(sources.currency, currency);
+  });
+}
+
+test('changed or unsupported account currency prevents withdrawal writes', async () => {
+  for (const [actual, expected] of [['USD', 'GBP'], ['EUR', undefined]]) {
+    const db = db2Mock({ currency: actual });
+    await assert.rejects(demo().transaction(db, '12.50', false, expected), /currency changed|Unsupported account currency/);
+    assert.equal(db.state.commits, 0);
+    assert.equal(db.state.transactions.length, 0);
+    assert.ok(db.state.queries.every(sql => !/^(INSERT|UPDATE)/.test(sql)));
+  }
+});
+
+test('verification rejects mismatched or unsupported transaction currencies', async () => {
+  const service = demo();
+  const db = db2Mock({ currency: 'USD' });
+  const withdrawal = await service.transaction(db, '12.50');
+  for (const currency of ['GBP', 'EUR']) {
+    db.state.transactions[0].CURRENCY = currency;
+    assert.equal((await service.verifyTransaction(db, withdrawal.transactionId)).transactionValid, false);
+    assert.equal((await service.readApiVerificationSources(db, oracleMock(), withdrawal.transactionId)).transactionValid, false);
+  }
 });

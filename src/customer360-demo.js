@@ -20,11 +20,11 @@ function createDemoService({ db2Schema = 'BANKCORE', oracleSchema = 'BANKCRM', c
   const kycId = String(kycCustomerId).trim();
   const account = String(accountId).trim();
   const withdrawalAmount = formatMinorUnits(moneyToMinorUnits(amount, 'DEMO_WITHDRAWAL_AMOUNT'));
-  const transactionCurrency = String(currency).trim().toUpperCase();
+  const configuredCurrency = String(currency).trim().toUpperCase();
   if (!/^\d+$/.test(id)) throw new Error('DEMO_CUSTOMER_ID must contain digits only');
   if (!/^\d+$/.test(kycId)) throw new Error('KYC customer ID must contain digits only');
   if (!account || account.length > 30) throw new Error('DEMO_ACCOUNT_ID must contain 1 to 30 characters');
-  if (transactionCurrency !== 'GBP') throw new Error('The Customer 360 demo withdrawal currency must be GBP');
+  if (!['AUD', 'USD', 'GBP'].includes(configuredCurrency)) throw new Error('The Customer 360 demo withdrawal currency must be AUD, USD, or GBP');
 
   async function customerAccount(dbConnection) {
     const rows = await dbConnection.query(
@@ -35,11 +35,14 @@ function createDemoService({ db2Schema = 'BANKCORE', oracleSchema = 'BANKCRM', c
     return rows[0];
   }
 
-  async function readWithdrawalAccount(dbConnection) {
+  async function readWithdrawalAccount(dbConnection, detailed = false) {
+    const trace = detailed ? require('./withdrawal-output').capture(dbConnection) : null;
+    if (trace) dbConnection = trace.db;
     const row = await customerAccount(dbConnection);
     return { customerId: String(row.CUSTOMER_ID).trim(), accountId: String(row.ACCOUNT_ID).trim(), customerName: String(row.CUSTOMER_NAME || '').trim(),
       accountStatus: String(row.ACCOUNT_STATUS || '').trim(), currency: String(row.CURRENCY || '').trim().toUpperCase(),
-      balance: row.BALANCE, availableBalance: row.AVAILABLE_BALANCE };
+      balance: row.BALANCE, availableBalance: row.AVAILABLE_BALANCE,
+      ...(trace ? { execution: trace.events } : {}) };
   }
 
   async function kycRecord(oracleConnection) {
@@ -52,22 +55,36 @@ function createDemoService({ db2Schema = 'BANKCORE', oracleSchema = 'BANKCRM', c
     return rows[0];
   }
 
-  async function status(dbConnection, oracleConnection) {
-    const customer = await customerAccount(dbConnection);
-    const transactions = await dbConnection.query(
+  async function status(dbConnection, oracleConnection, identifySource = false) {
+    let customer, transactions, kyc;
+    try {
+      customer = await customerAccount(dbConnection);
+      transactions = await dbConnection.query(
       `SELECT TRANSACTION_ID,TRANSACTION_TYPE,TRANSACTION_STAGE,TRANSACTION_STATUS,TRANSACTION_AMOUNT,CURRENCY,TRANSACTION_TIMESTAMP FROM ${db2Table('ACCOUNT_TRANSACTION')} WHERE ACCOUNT_ID=? ORDER BY TRANSACTION_TIMESTAMP DESC FETCH FIRST 10 ROWS ONLY`,
       [account]);
-    const kyc = await kycRecord(oracleConnection);
+    } catch (error) { if (identifySource) error.sourceSystem = 'AS400'; throw error; }
+    try { kyc = await kycRecord(oracleConnection); }
+    catch (error) { if (identifySource) error.sourceSystem = 'Oracle'; throw error; }
     return { customer, transactions, kyc };
   }
 
-  async function transaction(dbConnection, requestedAmount = withdrawalAmount) {
+  async function transaction(dbConnection, requestedAmount = withdrawalAmount, detailed = false, expectedCurrency) {
+    const trace = detailed ? require('./withdrawal-output').capture(dbConnection) : null;
+    if (trace) dbConnection = trace.db;
     const amountCents = moneyToMinorUnits(requestedAmount, 'Withdrawal amount');
     const amountText = formatMinorUnits(amountCents);
-    const relation = await customerAccount(dbConnection);
-    if (String(relation.CUSTOMER_STATUS).trim().toUpperCase() !== 'ACTIVE') throw new Error(`Customer ${id} is not active`);
-
-    await dbConnection.beginTransaction();
+    let transactionCurrency;
+    try {
+      const relation = await customerAccount(dbConnection);
+      if (String(relation.CUSTOMER_STATUS).trim().toUpperCase() !== 'ACTIVE') throw new Error(`Customer ${id} is not active`);
+      transactionCurrency = String(relation.CURRENCY).trim().toUpperCase();
+      if (!['AUD', 'USD', 'GBP'].includes(transactionCurrency)) throw new Error(`Unsupported account currency: ${transactionCurrency}`);
+      if (expectedCurrency && transactionCurrency !== expectedCurrency) throw new Error('Account currency changed after confirmation; obtain a new preview');
+      await dbConnection.beginTransaction();
+    } catch (error) {
+      if (trace) trace.failure(error);
+      throw error;
+    }
     let committed = false;
     let result;
     try {
@@ -80,8 +97,8 @@ function createDemoService({ db2Schema = 'BANKCORE', oracleSchema = 'BANKCRM', c
       const available = databaseMoneyToMinorUnits(locked.AVAILABLE_BALANCE, 'Available balance');
       if (String(locked.ACCOUNT_STATUS).trim().toUpperCase() !== 'ACTIVE') throw new Error(`Account ${account} is not active`);
       if (String(locked.CURRENCY).trim().toUpperCase() !== transactionCurrency) throw new Error(`Account ${account} currency is not ${transactionCurrency}`);
-      validateAgainstAvailable(amountCents, available);
-      if (amountCents > balance) throw new Error(`Withdrawal amount ${amountText} GBP exceeds account balance ${formatMinorUnits(balance)} GBP`);
+      validateAgainstAvailable(amountCents, available, transactionCurrency);
+      if (amountCents > balance) throw new Error(`Withdrawal amount ${amountText} ${transactionCurrency} exceeds account balance ${formatMinorUnits(balance)} ${transactionCurrency}`);
 
       const transactionId = `RT-${makeId()}`;
       const reference = `${DEMO_REFERENCE_PREFIX}${makeId()}`;
@@ -108,8 +125,10 @@ function createDemoService({ db2Schema = 'BANKCORE', oracleSchema = 'BANKCRM', c
       committed = true;
     } catch (error) {
       if (!committed) try { await dbConnection.rollback(); } catch {}
+      if (trace) trace.failure(error);
       throw error;
     }
+    if (trace) result.execution = trace.events;
     return result;
   }
 
@@ -176,12 +195,13 @@ function createDemoService({ db2Schema = 'BANKCORE', oracleSchema = 'BANKCRM', c
     return rows[0] || null;
   }
 
-  function validPostedWithdrawal(row) {
+  function validPostedWithdrawal(row, accountCurrency) {
     return Boolean(row && String(row.ACCOUNT_ID).trim() === account &&
       String(row.TRANSACTION_TYPE).trim().toUpperCase() === 'WITHDRAWAL' &&
       String(row.TRANSACTION_STAGE).trim().toUpperCase() === 'POSTED' &&
       String(row.TRANSACTION_STATUS).trim().toUpperCase() === 'COMPLETED' &&
-      String(row.CURRENCY).trim().toUpperCase() === 'GBP');
+      ['AUD', 'USD', 'GBP'].includes(String(row.CURRENCY).trim().toUpperCase()) &&
+      String(row.CURRENCY).trim().toUpperCase() === String(accountCurrency).trim().toUpperCase());
   }
 
   async function verifyTransaction(dbConnection, transactionId) {
@@ -189,9 +209,10 @@ function createDemoService({ db2Schema = 'BANKCORE', oracleSchema = 'BANKCRM', c
       transactionId ? exactTransaction(dbConnection, transactionId) : latestPostedWithdrawal(dbConnection)]);
     const [freshAccount, latestAfter] = await Promise.all([customerAccount(dbConnection), transactionId ? Promise.resolve(row) : latestPostedWithdrawal(dbConnection)]);
     const relationshipValid = String(customer.CUSTOMER_ID).trim() === id && String(customer.ACCOUNT_ID).trim() === account;
-    const transactionValid = validPostedWithdrawal(row) && (!transactionId || String(row.TRANSACTION_ID).trim() === String(transactionId).trim());
+    const transactionValid = validPostedWithdrawal(row, customer.CURRENCY) && (!transactionId || String(row.TRANSACTION_ID).trim() === String(transactionId).trim());
     const stableAccount = String(customer.BALANCE) === String(freshAccount.BALANCE) &&
-      String(customer.AVAILABLE_BALANCE) === String(freshAccount.AVAILABLE_BALANCE);
+      String(customer.AVAILABLE_BALANCE) === String(freshAccount.AVAILABLE_BALANCE) &&
+      String(customer.CURRENCY).trim().toUpperCase() === String(freshAccount.CURRENCY).trim().toUpperCase();
     const stableSelection = Boolean(transactionId) || String(row?.TRANSACTION_ID || '') === String(latestAfter?.TRANSACTION_ID || '');
     return { passed: relationshipValid && transactionValid && stableAccount && stableSelection, transaction: row, account: freshAccount,
       relationshipValid, transactionValid, stableAccount, stableSelection, selectedBy: transactionId ? 'exact transaction ID' : 'latest posted completed withdrawal' };
@@ -214,11 +235,12 @@ function createDemoService({ db2Schema = 'BANKCORE', oracleSchema = 'BANKCRM', c
     if (!row) throw new Error(`Transaction ${selectedId} was not found in account ${account}`);
     return {
       customerId: String(customer.CUSTOMER_ID).trim(), accountId: String(customer.ACCOUNT_ID).trim(),
+      ...(customer.CUSTOMER_NAME == null ? {} : { customerName: String(customer.CUSTOMER_NAME).trim() }),
       balance: customer.BALANCE, availableBalance: customer.AVAILABLE_BALANCE, currency: customer.CURRENCY,
       transaction: { id: row.TRANSACTION_ID, amount: row.TRANSACTION_AMOUNT, currency: row.CURRENCY,
         type: row.TRANSACTION_TYPE, stage: row.TRANSACTION_STAGE, status: row.TRANSACTION_STATUS, timestamp: row.TRANSACTION_TIMESTAMP },
       latestTransactionId: checkLatest ? latest?.TRANSACTION_ID ?? null : selectedId,
-      transactionValid: validPostedWithdrawal(row),
+      transactionValid: validPostedWithdrawal(row, customer.CURRENCY),
       kyc: { customerId: String(kycRow[0]).trim(), status: kycRow[2], riskRating: kycRow[3] ?? null }
     };
   }

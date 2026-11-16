@@ -87,7 +87,7 @@ function runTransaction({ answers = ['12.5', 'y'], mode = 'remote', status = 200
   const script = `
     const Module = require('node:module'); const load = Module._load;
     const answers = ${JSON.stringify(answers)}; const account = ${JSON.stringify(account)};
-    const committed = ${JSON.stringify(committed)};
+    const committed = { ...${JSON.stringify(committed)}, currency: account.currency };
     Object.defineProperty(process.stdin, 'isTTY', { value: ${tty} });
     Module._load = function(name) {
       if (name === './remote-https') return { createHttpsFetch: () => globalThis.fetch };
@@ -137,10 +137,10 @@ test('remote CLI reuses local amount prompts, confirmation and committed output 
 });
 
 test('cancelled, unconfirmed and invalid withdrawals never submit mutations', () => {
-  for (const answer of ['n', 'no', '', 'maybe']) {
+  for (const answer of ['N', 'n', 'no', '', 'maybe']) {
     const child = runTransaction({ answers: ['12.5', answer] });
     assert.equal(child.status, 0, child.stderr);
-    assert.match(child.stdout, /Withdrawal cancelled; no database changes were made/);
+    assert.match(child.stdout, /^Cancelled\. No changes were made\.$/m);
     assert.doesNotMatch(child.stderr, /HTTP POST/);
   }
   for (const amount of ['0', '-1', 'abc', '1.234', '90.01']) {
@@ -151,9 +151,26 @@ test('cancelled, unconfirmed and invalid withdrawals never submit mutations', ()
   }
 });
 
+for (const currency of ['AUD', 'USD', 'GBP']) {
+  test(`local and remote CLI use the ${currency} account currency and preserve cancellation`, () => {
+    const account = { ...preview.account, currency };
+    const local = runTransaction({ mode: 'local', account });
+    const remote = runTransaction({ account });
+    assert.equal(local.status, 0, local.stderr);
+    assert.equal(remote.status, 0, remote.stderr);
+    assert.equal(local.stdout, remote.stdout);
+    assert.ok(remote.stdout.includes(`Enter withdrawal amount in ${currency}`));
+    assert.ok(remote.stdout.includes(`Amount: 12.50 ${currency}`));
+    assert.match(remote.stderr, /HTTP POST \/api\/demo\/transaction/);
+    const cancelled = runTransaction({ account, answers: ['12.5', 'n'] });
+    assert.equal(cancelled.status, 0, cancelled.stderr);
+    assert.doesNotMatch(cancelled.stderr, /HTTP POST/);
+  });
+}
+
 test('preview failures, unsuitable accounts and noninteractive input prevent submission', () => {
   for (const options of [{ status: 401 }, { status: 403 }, { tty: false },
-    { account: { ...preview.account, currency: 'USD' } }, { account: { ...preview.account, accountStatus: 'CLOSED' } }]) {
+    { account: { ...preview.account, currency: 'EUR' } }, { account: { ...preview.account, accountStatus: 'CLOSED' } }]) {
     const child = runTransaction(options);
     assert.equal(child.status, 1, child.stdout);
     assert.doesNotMatch(child.stderr, /HTTP POST|FORBIDDEN/);

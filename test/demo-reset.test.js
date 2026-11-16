@@ -4,6 +4,20 @@ const assert = require('node:assert/strict');
 const { createDemoReset } = require('../src/demo-reset');
 const { runResetCommand } = require('../src/reset-cli');
 const { createRemoteClient } = require('../src/remote-client');
+const { stripVTControlCharacters } = require('node:util');
+
+function resultRows(lines) {
+  const plain = lines.map(line => stripVTControlCharacters(line));
+  const start = plain.lastIndexOf('RESULT');
+  assert.notEqual(start, -1, 'reset output must include a RESULT table');
+  return plain.slice(start + 1).filter(line => /^\s+(Oracle|AS400)\s{2,}/.test(line))
+    .map(line => line.trim().split(/\s{2,}/));
+}
+
+function assertResult(lines, system, field, value, check) {
+  assert.deepEqual(resultRows(lines).find(row => row[0] === system && row[1] === field),
+    [system, field, value, check]);
+}
 
 function fixture({ failAccount = false, failKyc = false, mismatch = false } = {}) {
   const state = { balance: '123.00', available: '100.00', status: 'REVIEW_REQUIRED', risk: 'HIGH', updates: 0, kycUpdates: 0, rollbacks: 0 };
@@ -77,10 +91,13 @@ test('CLI cancellation does not execute reset; confirmed reset prints IDs and bo
   assert.equal(executions, 0);
   await runResetCommand({ preview, execute, ask: ask(['3', 'y']), log: line => lines.push(line) });
   assert.equal(executions, 1);
-  assert.match(lines.join('\n'), /Customer ID       : 765432/);
-  assert.match(lines.join('\n'), /Account ID        : CUSTOM-ACCOUNT/);
-  assert.match(lines.join('\n'), /KYC Reset         : SUCCESS/);
-  assert.match(lines.join('\n'), /Available Balance : 40000.00/);
+  assert.match(lines.join('\n'), /Customer ID: 765432/);
+  assert.match(lines.join('\n'), /Account ID: CUSTOM-ACCOUNT/);
+  assert.match(lines.join('\n'), /^PREVIEW$/m);
+  assertResult(lines, 'Oracle', 'KYC status', 'VERIFIED', 'PASS');
+  assertResult(lines, 'AS400', 'Available balance', '40000.00', 'PASS');
+  assert.match(lines.join('\n'), /Demo data reset\. Ready for the next demo\./);
+  assert.match(lines.join('\n'), /Transaction history is preserved/);
 });
 
 test('remote reset sends confirmation and idempotency key and accepts a partial failure report', async () => {
@@ -110,9 +127,11 @@ test('CLI partial failure summary identifies each result and explains separate c
   const result = await runResetCommand({ preview: async () => ({ account: { customerId: report.customerId, accountId: report.accountId, balance: '123.00', availableBalance: '100.00' }, kyc: {} }),
     execute: async () => report, ask: (() => { const answers = ['3', 'y']; return async () => answers.shift(); })(), log: line => lines.push(line) });
   assert.equal(result.passed, false);
-  assert.match(lines.join('\n'), /KYC Reset         : FAILED/);
-  assert.match(lines.join('\n'), /Balance           : 40000.00/);
+  assertResult(lines, 'Oracle', 'KYC status', 'NOT VERIFIED', 'FAIL');
+  assertResult(lines, 'Oracle', 'Risk rating', 'NOT VERIFIED', 'FAIL');
+  assertResult(lines, 'AS400', 'Balance', '40000.00', 'PASS');
   assert.match(lines.join('\n'), /failed or partially completed/);
+  assert.doesNotMatch(lines.join('\n'), /Demo data reset\. Ready for the next demo\./);
 });
 
 for (const [choice, operation] of [['1', 'kyc'], ['2', 'account'], ['3', 'both']]) {
@@ -124,11 +143,15 @@ for (const [choice, operation] of [['1', 'kyc'], ['2', 'account'], ['3', 'both']
     assert.equal(result.passed, true);
     assert.equal(f.state.kycUpdates, operation === 'account' ? 0 : 1);
     assert.equal(f.state.updates, operation === 'kyc' ? 0 : 1);
-    const summary = lines.join('\n').split('========== RESET SUMMARY ==========')[1];
-    if (operation !== 'account') assert.match(summary, /KYC Reset         : SUCCESS/);
-    else assert.doesNotMatch(summary, /KYC Reset/);
-    if (operation !== 'kyc') assert.match(summary, /Available Balance : 40000.00/);
-    else assert.doesNotMatch(summary, /Balance/);
+    const summary = resultRows(lines);
+    if (operation !== 'account') {
+      assertResult(lines, 'Oracle', 'KYC status', 'VERIFIED', 'PASS');
+      assertResult(lines, 'Oracle', 'Risk rating', 'LOW', 'PASS');
+    } else assert.ok(summary.every(row => row[0] !== 'Oracle'));
+    if (operation !== 'kyc') {
+      assertResult(lines, 'AS400', 'Balance', '40000.00', 'PASS');
+      assertResult(lines, 'AS400', 'Available balance', '40000.00', 'PASS');
+    } else assert.ok(summary.every(row => row[0] !== 'AS400'));
     assert.equal((await f.run(operation)).passed, true);
     assert.equal(f.state.kycUpdates, operation === 'account' ? 0 : 1);
     assert.equal(f.state.updates, operation === 'kyc' ? 0 : 1);
@@ -175,15 +198,23 @@ for (const kycBaseline of [false, true]) for (const accountBaseline of [false, t
         assert.equal(operation, kycBaseline ? 'account' : accountBaseline ? 'kyc' : 'both');
         return f.run(operation);
       } });
-    if (kycBaseline && accountBaseline) { assert.equal(result, undefined); assert.equal(answers.length, 1); assert.ok(lines.join(' ').includes('No reset required.')); return; }
+    if (kycBaseline && accountBaseline) {
+      assert.equal(result, undefined);
+      assert.equal(answers.length, 1);
+      assert.match(lines.join('\n'), /Nothing to reset\. Demo data is already at the baseline\./);
+      assert.equal(resultRows(lines).length, 4);
+      assert.ok(resultRows(lines).every(row => row[3] === 'SKIPPED'));
+      assert.equal(f.state.kycUpdates, 0);
+      assert.equal(f.state.updates, 0);
+      return;
+    }
     assert.equal(result.passed, true);
     assert.equal(f.state.kycUpdates, kycBaseline ? 0 : 1);
     assert.equal(f.state.updates, accountBaseline ? 0 : 1);
-    const summary = lines.join('\n').split('========== RESET SUMMARY ==========')[1];
-    assert.ok(summary.includes(`KYC Reset         : ${kycBaseline ? 'SKIPPED - no reset required' : 'SUCCESS'}`));
-    assert.ok(summary.includes(`Account Reset     : ${accountBaseline ? 'SKIPPED - no reset required' : 'SUCCESS'}`));
-    assert.match(summary, /KYC Status        : VERIFIED\nRisk Level        : LOW/);
-    assert.match(summary, /Balance           : 40000.0+\nAvailable Balance : 40000.00/);
+    assertResult(lines, 'Oracle', 'KYC status', 'VERIFIED', kycBaseline ? 'SKIPPED' : 'PASS');
+    assertResult(lines, 'Oracle', 'Risk rating', 'LOW', kycBaseline ? 'SKIPPED' : 'PASS');
+    assertResult(lines, 'AS400', 'Balance', '40000.00', accountBaseline ? 'SKIPPED' : 'PASS');
+    assertResult(lines, 'AS400', 'Available balance', '40000.00', accountBaseline ? 'SKIPPED' : 'PASS');
   });
 }
 
@@ -195,10 +226,8 @@ test('source preview failure stops before confirmation or writes', async () => {
   assert.ok(!lines.join(' ').includes('Will reset:'));
 });
 
-for (const [choice, operation, message] of [
-  ['1', 'kyc', 'KYC is already VERIFIED / LOW. No reset required.'],
-  ['2', 'account', 'Account balances are already 40000. No reset required.'],
-  ['3', 'both', 'KYC and account balances are already at their default values. No reset required.']
+for (const [choice, operation] of [
+  ['1', 'kyc'], ['2', 'account'], ['3', 'both']
 ]) {
   test(`baseline option ${choice} reads after selection and never confirms or executes`, async () => {
     let selected = false; let reads = 0; const lines = [];
@@ -209,11 +238,21 @@ for (const [choice, operation, message] of [
         return { account: { customerId: '765432', accountId: 'CUSTOM-ACCOUNT', balance: '40000.0000', availableBalance: 40000 },
           kyc: { customerId: '765432', status: 'VERIFIED', riskRating: 'LOW' } };
       }, execute: async () => assert.fail('must not execute a reset') });
-    assert.equal(reads, 1); assert.ok(lines.includes(message));
-    const display = lines.slice(2).join('\n');
-    assert.match(display, /Customer ID       : 765432/);
-    if (operation === 'kyc') assert.doesNotMatch(display, /Account ID|Balance/);
-    if (operation === 'account') assert.doesNotMatch(display, /KYC Status|Risk Level/);
+    assert.equal(reads, 1);
+    assert.match(lines.join('\n'), /Nothing to reset\. Demo data is already at the baseline\./);
+    const rows = resultRows(lines);
+    assert.equal(rows.length, operation === 'both' ? 4 : 2);
+    assert.ok(rows.every(row => row[3] === 'SKIPPED'));
+    const display = lines.join('\n');
+    assert.match(display, /Customer ID: 765432/);
+    if (operation === 'kyc') {
+      assert.ok(rows.every(row => row[0] === 'Oracle'));
+      assert.doesNotMatch(display, /^Account ID:|^\s+AS400\s{2,}/m);
+    }
+    if (operation === 'account') {
+      assert.ok(rows.every(row => row[0] === 'AS400'));
+      assert.doesNotMatch(display, /KYC status|Risk rating/);
+    }
   });
 }
 

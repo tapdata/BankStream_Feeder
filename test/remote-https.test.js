@@ -14,15 +14,26 @@ const modulePath = path.resolve(__dirname, '../src/remote-https.js');
 const pem = fs.readFileSync(path.resolve(__dirname, '../public-key-certificate/bankstream-vip-2year.crt'), 'utf8');
 // Read only the URL from customer configuration; requests remain mocked and use a test token.
 const envPath = path.resolve(__dirname, '../.env');
-const fileEnv = fs.existsSync(envPath) ? require('dotenv').parse(fs.readFileSync(envPath)) : {};
+const examplePath = path.resolve(__dirname, '../.env.example');
+const selectedEnvPath = fs.existsSync(envPath) ? envPath : examplePath;
+const fileEnv = fs.existsSync(selectedEnvPath) ? require('dotenv').parse(fs.readFileSync(selectedEnvPath)) : {};
 const env = {
   DEMO_API_URL: process.env.DEMO_API_URL || fileEnv.DEMO_API_URL,
   DEMO_API_TOKEN: 'tls-test-token'
 };
 
-if (!env.DEMO_API_URL) throw new Error('Set DEMO_API_URL in .env before running HTTPS tests.');
+if (!env.DEMO_API_URL) throw new Error('Set DEMO_API_URL in the environment, .env or .env.example before running HTTPS tests.');
 const configuredUrl = new URL(env.DEMO_API_URL);
 const configuredHost = configuredUrl.hostname.replace(/^\[|\]$/g, '');
+
+test('live .env API accepts configured credentials and returns valid status', {
+  skip: !fs.existsSync(envPath) ? 'No .env: running offline tests with .env.example'
+    : require('../src/execution-mode').getExecutionMode(fileEnv) !== 'remote' && 'Local mode: checked by local live tests'
+}, async () => {
+  // Read-only request with real credentials; never print the token or customer data.
+  const client = createRemoteClient({ env: fileEnv });
+  await client.execute('status');
+});
 
 function loadTransport({ read = fs.readFileSync, failure, inspect = () => {} } = {}) {
   const module = { exports: {} };

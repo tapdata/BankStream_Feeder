@@ -72,7 +72,7 @@ function validStatus(data) {
 function createRemoteClient({ env = process.env, fetchImpl } = {}) {
   const config = getRemoteConfig(env);
   const { createHttpsFetch, tlsErrorMessage } = require('./remote-https');
-  fetchImpl ??= createHttpsFetch();
+  fetchImpl ??= createHttpsFetch(env);
   if (typeof fetchImpl !== 'function') throw new Error('Remote mode requires Node.js 18 or newer');
 
   async function execute(operation, input = {}) {
@@ -132,7 +132,30 @@ function createRemoteClient({ env = process.env, fetchImpl } = {}) {
         throw new Error(controller.signal.aborted ? 'Remote request timed out' : tlsErrorMessage(error) || 'Unable to reach Demo Control Service');
       }
       if (response.status === 401 || response.status === 403) throw new Error('Demo Control Service authentication failed; check your API token');
-      if (!response.ok) throw new Error(`Demo Control Service returned HTTP ${response.status}`);
+      if (!response.ok) {
+        const error = new Error(`Demo Control Service returned HTTP ${response.status}`);
+        if (operation === 'transaction') {
+          try {
+            const payload = await readJson(response);
+            const detail = require('./withdrawal-output').failureDetails(payload?.withdrawalExecution);
+            if (detail) error.withdrawalExecution = detail;
+          } catch { /* Older services may not return structured execution details. */ }
+        }
+        if (['kyc', 'kycPreview'].includes(operation)) {
+          try {
+            const payload = await readJson(response);
+            const detail = require('./kyc-output').failureDetails(payload?.kycExecution);
+            if (detail) error.kycExecution = detail;
+          } catch { /* Older services may not return KYC execution details. */ }
+        }
+        if (['status', 'verify'].includes(operation)) {
+          try {
+            const payload = await readJson(response);
+            if (['AS400', 'Oracle'].includes(payload?.sourceSystem)) error.sourceSystem = payload.sourceSystem;
+          } catch { /* Older services may not identify the failed source system. */ }
+        }
+        throw error;
+      }
       let payload;
       try { payload = await readJson(response); }
       catch { throw new Error('Demo Control Service returned an invalid response'); }
@@ -147,7 +170,10 @@ function createRemoteClient({ env = process.env, fetchImpl } = {}) {
     catch (error) {
       if (operation === 'realtimeStart') throw new Error(`${error.message}. A job may have started; do not start another. Retain idempotency key ${input.idempotencyKey} for reconciliation.`);
       if (mutation) {
-        throw new Error(`${error.message}. ${operation === 'transaction' ? 'Withdrawal' : operation === 'reset' ? 'Demo reset' : 'KYC mutation'} outcome may be unknown; do not submit a new mutation. Retain idempotency key ${input.idempotencyKey} for reconciliation.`);
+        const failure = new Error(`${error.message}. ${operation === 'transaction' ? 'Withdrawal' : operation === 'reset' ? 'Demo reset' : 'KYC mutation'} outcome may be unknown; do not submit a new mutation. Retain idempotency key ${input.idempotencyKey} for reconciliation.`);
+        if (operation === 'transaction' && error.withdrawalExecution) failure.withdrawalExecution = error.withdrawalExecution;
+        if (operation === 'kyc' && error.kycExecution) failure.kycExecution = error.kycExecution;
+        throw failure;
       }
       throw error;
     }

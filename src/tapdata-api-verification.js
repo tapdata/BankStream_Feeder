@@ -186,7 +186,7 @@ function createTapDataVerifier({ env = process.env, fetchImpl = globalThis.fetch
       latestTransactionId: explicitTransactionId ? undefined : String(value.latestTransactionId) });
     const appendSourceValidity = (rows, source) => {
       if (source.transactionValid === false) rows.push({ group: 'Transaction', field: 'Source withdrawal status',
-        source: 'FAIL: expected WITHDRAWAL / POSTED / COMPLETED / GBP', api: 'NOT APPLICABLE', passed: false });
+        source: 'FAIL: expected WITHDRAWAL / POSTED / COMPLETED in supported account currency', api: 'NOT APPLICABLE', passed: false });
     };
     while (true) {
       attempts++;
@@ -250,23 +250,7 @@ function createTapDataVerifier({ env = process.env, fetchImpl = globalThis.fetch
 }
 
 function printReport(result, source) {
-  console.log('========== TAPDATA API VERIFICATION ==========');
-  console.log(`\nCustomer ID: ${source.customerId}`);
-  console.log(`Account ID : ${source.accountId}`);
-  if (source.transaction?.id) console.log(`Selected transaction: ${source.transaction.id}${source.transaction.timestamp ? ` (${source.transaction.timestamp})` : ''}`);
-  const groups = [...new Set(result.comparisons.map(row => row.group))];
-  for (const group of groups) {
-    console.log(`\n${group.toUpperCase()} COMPARISON`);
-    console.log('FIELD                         SOURCE DB                       TAPDATA API                    RESULT');
-    console.log('--------------------------------------------------------------------------------------------------');
-    for (const row of result.comparisons.filter(item => item.group === group)) {
-      console.log(`${row.field.padEnd(29)} ${row.source.padEnd(30)} ${row.api.padEnd(29)} ${row.passed ? 'PASS' : 'FAIL'}`);
-    }
-  }
-  if (result.error) console.log(`\nAPI detail: ${result.error}`);
-  if (result.timedOut) console.log(`CDC comparison timed out after ${result.attempts} attempt(s).`);
-  console.log('\n---------------------------------------------------------');
-  console.log(`Overall Result: ${result.passed ? 'PASS' : 'FAIL'}`);
+  require('./verification-output').render({ passed: result.passed, api: { result, source, passed: result.passed } });
 }
 
 module.exports = { createTapDataVerifier, compare, rowsFrom, decimalUnits, printReport, DEFAULTS };

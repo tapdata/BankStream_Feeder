@@ -51,58 +51,66 @@ async function withConnection(connect, action) {
 }
 
 function printStatus(result) {
-  const { customer, transactions, kyc } = result;
-  console.log(`Customer ${customer.CUSTOMER_ID}: ${String(customer.CUSTOMER_NAME).trim()} (${String(customer.CUSTOMER_STATUS).trim()})`);
-  console.log(`Account ${String(customer.ACCOUNT_ID).trim()} / ${String(customer.ACCOUNT_NUMBER).trim()}: ${String(customer.ACCOUNT_STATUS).trim()}, ${String(customer.CURRENCY).trim()}`);
-  console.log(`Balance: ${customer.BALANCE} | Available balance: ${customer.AVAILABLE_BALANCE}`);
-  console.log(`Relationship: ${String(customer.OWNERSHIP_ROLE).trim()}; active from ${customer.EFFECTIVE_FROM}${customer.EFFECTIVE_TO ? ` through ${customer.EFFECTIVE_TO}` : ''}`);
-  console.log(`Oracle KYC: ${String(kyc[2]).trim()} | Risk rating: ${String(kyc[3] ?? 'N/A').trim()}`);
-  console.log(`Recent transactions (${transactions.length}):`);
-  if (!transactions.length) console.log('  No transactions returned.');
-  for (const row of transactions) console.log(`  ${String(row.TRANSACTION_TIMESTAMP).trim()} | ${String(row.TRANSACTION_ID).trim()} | ${String(row.TRANSACTION_TYPE).trim()} ${row.TRANSACTION_AMOUNT} ${String(row.CURRENCY).trim()} | ${String(row.TRANSACTION_STAGE).trim()} / ${String(row.TRANSACTION_STATUS).trim()}`);
+  if (!require('./status-output').render(result)) process.exitCode = 1;
 }
 
 async function runWithdrawal(account, submit) {
-  console.log(`Customer ${account.customerId} / ${account.customerName}`);
-  console.log(`Account ${account.accountId} (${account.currency}) balance: ${account.balance}; available: ${account.availableBalance}`);
-  if (account.currency !== 'GBP') throw new Error(`Interactive demo withdrawals require a GBP account; this account is ${account.currency}`);
+  const output = require('./withdrawal-output');
+  output.header(account);
+  output.line('SQL summaries below omit technical details; they are not the full executed SQL.', 'hint');
+  if (account.execution) output.execution(account.execution, { preview: true, currency: account.currency });
+  else {
+    output.line('STEP 1  Read the current account balance (SQL details unavailable from service)', 'step');
+    output.line(`  ->    Balance: ${formatMinorUnits(databaseMoneyToMinorUnits(account.balance))} ${account.currency}`);
+    output.line(`  ->    Available: ${formatMinorUnits(databaseMoneyToMinorUnits(account.availableBalance))} ${account.currency}`);
+  }
+  if (!['AUD', 'USD', 'GBP'].includes(account.currency)) throw new Error(`Unsupported account currency: ${account.currency}`);
   if (account.accountStatus.toUpperCase() !== 'ACTIVE') throw new Error(`Account ${account.accountId} is not active`);
-  const entered = (await ask('Enter withdrawal amount in GBP (up to 2 decimal places): ')).trim();
+  const entered = (await ask(`Enter withdrawal amount in ${account.currency} (up to 2 decimal places): `)).trim();
   const amountCents = moneyToMinorUnits(entered, 'Withdrawal amount');
-  validateAgainstAvailable(amountCents, account.availableBalance);
-  console.log(`Entered withdrawal amount: GBP ${formatMinorUnits(amountCents)}`);
+  validateAgainstAvailable(amountCents, account.availableBalance, account.currency);
+  output.line(`Amount: ${formatMinorUnits(amountCents)} ${account.currency}`, 'amount');
   if (!(await confirmWithdrawal())) {
-    console.log('Withdrawal cancelled; no database changes were made.');
+    console.log('Cancelled. No changes were made.');
     return;
   }
-  const result = await submit(formatMinorUnits(amountCents));
-  console.log(`Withdrawal committed: ${result.transactionId}`);
-  console.log(`Amount: ${result.amount} ${result.currency}`);
-  console.log(`Balance: ${result.previousBalance} -> ${result.newBalance} ${result.currency}`);
-  console.log(`Available balance: ${result.previousAvailableBalance} -> ${result.newAvailableBalance} ${result.currency}`);
-  console.log(`Transaction timestamp: ${result.transactionTimestamp}`);
-  console.log(`Commit completed at: ${result.completionTimestamp}`);
+  let result;
+  try { result = await submit(formatMinorUnits(amountCents)); }
+  catch (error) {
+    if (error.withdrawalExecution) {
+      output.failure(error.withdrawalExecution);
+    } else output.line('Withdrawal failed; execution details unavailable. Check the reported outcome.', 'error');
+    throw error;
+  }
+  if (result.execution) output.execution(result.execution, { currency: result.currency });
+  else output.line('SQL execution details unavailable from this service version.');
+  output.summary(result);
 }
 
 async function runKyc(mode, adapter) {
-  const initial = await adapter.currentKyc();
+  let initial;
+  try { initial = await adapter.currentKyc(); }
+  catch (error) {
+    if (mode === 'kyc') require('./kyc-output').failure(error.kycExecution);
+    throw error;
+  }
   const previewCustomerId = initial.customerId;
   if (mode === 'kyc') {
-
+    const output = require('./kyc-output');
     const preview = initial;
-    console.log(`Customer ${previewCustomerId} current KYC: ${preview.status} / ${preview.riskRating ?? 'N/A'}`);
+    output.preview(preview);
     if (preview.status === 'REVIEW_REQUIRED' && preview.riskRating === 'HIGH') {
-      console.log('No update needed; Oracle already has REVIEW_REQUIRED / HIGH.');
+      output.noUpdate();
       return;
     }
     if (!(await confirmKyc('Confirm KYC update? (y/N): '))) {
-      console.log('KYC update cancelled; no database changes were made.');
+      console.log('Cancelled. No changes were made.');
       return;
     }
-    const result = await adapter.setKyc(preview);
-    console.log(result.changed ? 'Oracle KYC updated and read back successfully.' : 'No update needed.');
-    console.log(`Previous: ${result.previous.status} / ${result.previous.riskRating ?? 'N/A'}`);
-    console.log(`Updated:  ${result.current.status} / ${result.current.riskRating ?? 'N/A'}`);
+    let result;
+    try { result = await adapter.setKyc(preview); }
+    catch (error) { output.failure(error.kycExecution); throw error; }
+    output.result(result);
     return;
   }
   if (mode === 'kyc:reset') {
@@ -141,7 +149,12 @@ async function main(mode) {
       printVerification(report);
       if (!report.passed) process.exitCode = 1;
     } else if (mode === 'kyc' || mode === 'kyc:reset') {
-      const preview = await client.execute('kycPreview');
+      let preview;
+      try { preview = await client.execute('kycPreview'); }
+      catch (error) {
+        if (mode === 'kyc') require('./kyc-output').failure(error.kycExecution);
+        throw error;
+      }
       let result;
       await runKyc(mode, { currentKyc: async () => preview.kyc,
         setKyc: async () => client.execute('kyc', { previewId: preview.previewId, confirmed: true, idempotencyKey: require('node:crypto').randomUUID() }),
@@ -159,16 +172,17 @@ async function main(mode) {
   }
   initializeLocal();
   if (mode === 'status') {
-    await withConnection(() => connectDb2(config), async db2 => {
-      await withConnection(() => connectOracle(config), async oracle => printStatus(await service.status(db2, oracle)));
+    const { withSource } = require('./status-output');
+    await withSource(() => connectDb2(config), 'AS400', async db2 => {
+      await withSource(() => connectOracle(config), 'Oracle', async oracle => printStatus(await service.status(db2, oracle, true)));
     });
     return;
   }
   if (mode === 'transaction') {
     await withConnection(() => connectDb2(config), async db2 => {
       try {
-        const account = await service.readWithdrawalAccount(db2);
-        await runWithdrawal(account, amount => service.transaction(db2, amount));
+        const account = await service.readWithdrawalAccount(db2, true);
+        await runWithdrawal(account, amount => service.transaction(db2, amount, true, account.currency));
       } catch (error) {
         throw error;
       }
@@ -177,14 +191,17 @@ async function main(mode) {
   }
   if (['kyc', 'kyc:reset'].includes(mode)) {
     await withConnection(() => connectOracle(config), oracle => runKyc(mode, {
-      currentKyc: () => service.currentKyc(oracle), setKyc: preview => service.setKyc(oracle, preview),
+      currentKyc: () => mode === 'kyc'
+        ? require('./kyc-output').observe(oracle, connection => service.currentKyc(connection)) : service.currentKyc(oracle),
+      setKyc: preview => require('./kyc-output').observe(oracle, connection => service.setKyc(connection, preview)),
       resetKyc: current => service.resetKyc(oracle, current), finalKyc: () => service.currentKyc(oracle)
     }));
     return;
   }
   if (mode === 'verify') {
-    const report = await runVerification({ service, withDb2: action => withConnection(() => connectDb2(config), action),
-      withOracle: action => withConnection(() => connectOracle(config), action), env: process.env }, parseVerificationArgs(process.argv.slice(3)));
+    const { withSource } = require('./status-output');
+    const report = await runVerification({ service, withDb2: action => withSource(() => connectDb2(config), 'AS400', action),
+      withOracle: action => withSource(() => connectOracle(config), 'Oracle', action), env: process.env }, parseVerificationArgs(process.argv.slice(3)));
     printVerification(report);
     if (!report.passed) process.exitCode = 1;
     return;
@@ -194,6 +211,9 @@ async function main(mode) {
 
 
 main(process.argv[2]).catch(error => {
-  console.error(`Customer 360 demo failed: ${error.message}`);
+  if (process.argv[2] === 'status') require('./status-output').failure(error, process.env.FEEDER_MODE?.trim() === 'remote');
+  else if (process.argv[2] === 'verify') require('./verification-output').failure(error);
+  else if (['transaction', 'kyc'].includes(process.argv[2])) require('./withdrawal-output').errorMessage(error);
+  else console.error(`Customer 360 demo failed: ${error.message}`);
   process.exitCode = 1;
 });

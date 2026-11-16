@@ -30,10 +30,10 @@ function formatMinorUnits(value) {
   return `${sign}${absolute / 100n}.${String(absolute % 100n).padStart(2, '0')}`;
 }
 
-function validateAgainstAvailable(amount, available) {
+function validateAgainstAvailable(amount, available, currency = 'GBP') {
   const amountCents = typeof amount === 'bigint' ? amount : moneyToMinorUnits(amount, 'Withdrawal amount');
   const availableCents = typeof available === 'bigint' ? available : databaseMoneyToMinorUnits(available, 'Available balance');
-  if (amountCents > availableCents) throw new Error(`Withdrawal amount ${formatMinorUnits(amountCents)} GBP exceeds available balance ${formatMinorUnits(availableCents)} GBP`);
+  if (amountCents > availableCents) throw new Error(`Withdrawal amount ${formatMinorUnits(amountCents)} ${currency} exceeds available balance ${formatMinorUnits(availableCents)} ${currency}`);
   return amountCents;
 }
 

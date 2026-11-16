@@ -6,13 +6,18 @@ const path = require('node:path');
 const { X509Certificate } = require('node:crypto');
 const { Readable } = require('node:stream');
 
-function createHttpsFetch() {
+function createHttpsFetch(env = require('node:process').env) {
+  const customCertificate = env.DEMO_API_CA_CERT?.trim();
+  const certificatePath = customCertificate
+    ? path.resolve(__dirname, '..', customCertificate)
+    : path.join(__dirname, '../public-key-certificate/bankstream-vip-2year.crt');
   let certificate;
   try {
-    certificate = readFileSync(path.join(__dirname, '../public-key-certificate/bankstream-vip-2year.crt'), 'utf8');
+    certificate = readFileSync(certificatePath, 'utf8');
     if (/PRIVATE KEY/.test(certificate)) throw new Error('Private key');
     new X509Certificate(certificate);
   } catch {
+    if (customCertificate) throw new Error('Cannot load HTTPS certificate configured by DEMO_API_CA_CERT; use a valid public PEM certificate without a private key.');
     throw new Error('Cannot load bundled HTTPS certificate public-key-certificate/bankstream-vip-2year.crt; restore this file from the Feeder release.');
   }
   const ca = [...(tls.getCACertificates ? tls.getCACertificates('default') : tls.rootCertificates), certificate];

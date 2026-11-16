@@ -12,6 +12,8 @@ const stopping = () => Boolean(signal?.aborted);
 const DB2_SCHEMA = (config.db2.schema || 'BANKCORE').toUpperCase();
 const db2Table = name => `${DB2_SCHEMA}.${name}`;
 const pick = values => values[crypto.randomInt(values.length)];
+const supportedCurrencies = ['AUD', 'USD', 'GBP'];
+let currencyIndex = 0;
 const money = () => Number((8 + Math.random() * 650).toFixed(2));
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 const retryable = error => /08S01|08001|HYT00|timeout|temporar|connection reset|ECONN/i.test(error.message);
@@ -178,9 +180,9 @@ async function loadWorkloadRecords(db2,oracle,summary) {
   try { oracleResult=await oracle.execute(`SELECT CUSTOMER_ID,CUSTOMER_PROFILE_ID FROM ${config.oracle.schema}.CUSTOMER_PROFILE`); }
   catch(error) { recordFailure(summary,error,{schema:config.oracle.schema,table:'CUSTOMER_PROFILE',operation:'SELECT'}); throw error; }
   const profileByCustomer=new Map(oracleResult.rows.map(row=>[String(row[0]).trim(),String(row[1]).trim()]));
-  const records=dbRows.map(row=>({customer:Number(row.CUSTOMER_ID),accountId:String(row.ACCOUNT_ID).trim(),currency:String(row.CURRENCY).trim(),customerProfileId:profileByCustomer.get(String(row.CUSTOMER_ID).trim())})).filter(row=>row.customerProfileId!==undefined);
+  const records=dbRows.map(row=>({customer:Number(row.CUSTOMER_ID),accountId:String(row.ACCOUNT_ID).trim(),currency:String(row.CURRENCY).trim().toUpperCase(),customerProfileId:profileByCustomer.get(String(row.CUSTOMER_ID).trim())})).filter(row=>row.customerProfileId!==undefined && supportedCurrencies.includes(row.currency));
   if(!records.length) {
-    const error=new Error('No active Db2 customer accounts with matching Oracle customer profiles were found');
+    const error=new Error('No active Db2 customer accounts in AUD, USD, or GBP with matching Oracle customer profiles were found');
     recordFailure(summary,error,{schema:'FEEDER',table:'CUSTOMER/BANK_ACCOUNT/CUSTOMER_PROFILE',operation:'VALIDATE'});
     throw error;
   }
@@ -189,7 +191,11 @@ async function loadWorkloadRecords(db2,oracle,summary) {
 
 async function cycle(db2,oracle,records,summary) {
   await recoverPending(db2,summary);
-  const selected=records[crypto.randomInt(records.length)];
+  // Rotate currencies that actually have eligible accounts; keep random account selection within each currency.
+  const currencies=supportedCurrencies.filter(currency=>records.some(row=>row.currency===currency));
+  if (!currencies.length) throw new Error('No eligible AUD, USD, or GBP accounts were found');
+  const currencyGroup=currencies[currencyIndex++ % currencies.length];
+  const selected=pick(records.filter(row=>row.currency===currencyGroup));
   const {customer,accountId,currency,customerProfileId}=selected;
   const type=pick(['DEPOSIT','WITHDRAWAL','CARD_PURCHASE','BILL_PAYMENT']);
   const eventKey=`RT-${crypto.randomUUID()}`;
@@ -208,6 +214,7 @@ async function realtime(db2,oracle,options={}) {
   try {
     progress(summary);
     const records=await loadWorkloadRecords(db2,oracle,summary);
+    log('Workload currencies: ' + supportedCurrencies.filter(currency=>records.some(row=>row.currency===currency)).join(', ') + ' (existing matching accounts only).');
     log('Real-time workload started. Ctrl+C to stop.');
     const deadline = Date.now() + (options.durationMs ?? Infinity);
     await runSchedule({

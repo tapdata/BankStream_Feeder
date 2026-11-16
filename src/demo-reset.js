@@ -3,6 +3,9 @@
 const { createDemoService, DEFAULTS } = require('./customer360-demo');
 const { databaseMoneyToMinorUnits, formatMinorUnits } = require('./demo-amount');
 
+// Existing fixed reset targets, exposed for presentation only.
+const RESET_BASELINE = Object.freeze({ status: 'VERIFIED', riskRating: 'LOW', balance: '40000.00', availableBalance: '40000.00' });
+
 function createDemoReset(settings = {}) {
   const customerId = String(settings.customerId || DEFAULTS.customerId).trim();
   const accountId = String(settings.accountId || DEFAULTS.accountId).trim();
@@ -39,25 +42,44 @@ function createDemoReset(settings = {}) {
     }
   }
 
-  async function run({ withDb2, withOracle }, operation = 'both') {
+  async function run({ withDb2, withOracle }, operation = 'both', detailed = false) {
     if (!['kyc', 'account', 'both'].includes(operation)) throw new Error('Invalid reset operation');
     const report = { customerId, accountId };
+    const execution = {};
+    const observe = (kind, withConnection, action) => withConnection(connection => {
+      if (!detailed) return action(connection);
+      const captured = require('./reset-output').capture(connection, kind);
+      execution[kind] = captured.detail;
+      return action(captured.connection);
+    });
     // Separate commits: preserve each outcome even if the other database fails.
     if (operation !== 'account') try {
-      report.kyc = await withOracle(async oracle => {
+      report.kyc = await observe('kyc', withOracle, async oracle => {
         const reset = await service.resetKyc(oracle);
         const final = await service.currentKyc(oracle);
         if (final.status !== 'VERIFIED' || final.riskRating !== 'LOW') throw new Error('KYC read-back did not match VERIFIED / LOW');
         return { passed: true, changed: reset.changed, status: final.status, riskRating: final.riskRating };
       });
     } catch (error) { report.kyc = { passed: false, error: error.message }; }
-    if (operation !== 'kyc') try { report.account = await withDb2(resetBalances); }
+    if (operation !== 'kyc') try { report.account = await observe('account', withDb2, resetBalances); }
     catch (error) { report.account = { passed: false, error: error.message }; }
     report.passed = [report.kyc, report.account].filter(Boolean).every(result => result.passed);
+    if (detailed) {
+      for (const kind of ['kyc', 'account']) if (report[kind]) {
+        const detail = execution[kind] || { events: [], commitAttempted: false, committed: false, rolledBack: false };
+        detail.step = kind === 'kyc' || operation === 'account' ? 1 : 2;
+        detail.title = kind === 'kyc' ? 'Restore customer KYC in Oracle' : 'Restore account balance in AS400';
+        detail.verified = report[kind].passed;
+        const values = detail.events.flatMap(event => event.values || []);
+        if (values.length) { detail.before = values[0]; detail.after = values[values.length - 1]; }
+        execution[kind] = detail;
+      }
+      report.execution = execution;
+    }
     return report;
   }
 
   return { run };
 }
 
-module.exports = { createDemoReset };
+module.exports = { createDemoReset, RESET_BASELINE };

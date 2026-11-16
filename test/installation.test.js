@@ -10,10 +10,14 @@ test('copied example selects remote mode with only URL/token and no local runtim
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   fs.copyFileSync(path.resolve(__dirname, '../.env.example'), path.join(directory, '.env'));
   const example = require('dotenv').parse(fs.readFileSync(path.join(directory, '.env')));
-  assert.deepEqual(Object.keys(example).sort(), ['DEMO_API_TOKEN', 'DEMO_API_URL', 'FEEDER_MODE']);
+  for (const key of ['DEMO_API_TOKEN', 'DEMO_API_URL', 'FEEDER_MODE']) {
+    assert.ok(example[key]?.trim(), `${key} must be set in .env.example`);
+  }
   assert.equal(require('../src/execution-mode').getExecutionMode(example), 'remote');
   const env = { ...process.env };
   for (const key of Object.keys(env)) if (/^(FEEDER_|DEMO_|DB2I_|ORACLE_|TAPDATA_)/.test(key)) delete env[key];
+  // Supply a test token in place of the example's user-facing placeholder.
+  env.DEMO_API_TOKEN = 'fixture-token';
   const entry = path.resolve(__dirname, '../scripts/doctor.js');
   const script = `
     const Module = require('node:module'); const load = Module._load;

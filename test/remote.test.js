@@ -114,8 +114,14 @@ test('remote status works without DB credentials or database imports and preserv
   for (const child of [remote, local, defaultLocal]) assert.equal(child.status, 0, child.stderr);
   assert.equal(remote.stdout, local.stdout);
   assert.equal(local.stdout, defaultLocal.stdout);
-  assert.match(remote.stdout, /Customer 100002: Demo/);
-  assert.match(remote.stdout, /Oracle KYC: VERIFIED/);
+  assert.match(remote.stdout, /Customer\s*:\s*100002 · Demo/);
+  assert.match(remote.stdout, /ACCOUNT \(AS400\)/);
+  assert.match(remote.stdout, /KYC \(Oracle\)/);
+  assert.match(remote.stdout, /KYC status\s+VERIFIED/);
+  assert.match(remote.stdout, /Balance\s+100\.00/);
+  assert.match(remote.stdout, /RECENT TRANSACTIONS \(AS400\)/);
+  assert.match(remote.stdout, /No recent transactions found\./);
+  assert.match(remote.stdout, /Status retrieved successfully\./);
 });
 
 test('remote CLI authentication failure exits with code 1', () => {

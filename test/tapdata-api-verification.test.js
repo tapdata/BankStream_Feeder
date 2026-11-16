@@ -4,6 +4,52 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createTapDataVerifier, compare, decimalUnits } = require('../src/tapdata-api-verification');
 
+test('verification table displays money consistently without changing comparison values', () => {
+  const comparisons = [
+    { group: 'Account', field: 'Balance', source: '40000.0000', api: '40000', passed: true },
+    { group: 'Account', field: 'Available Balance', source: '9007199254740993.0100', api: '9007199254740993.01', passed: true },
+    { group: 'Transaction', field: 'Amount', source: '600.0000', api: '600', passed: true },
+    { group: 'Transaction', field: 'Amount', source: '-2.5000', api: 'MISSING API FIELD/RECORD', passed: false }
+  ];
+  const before = JSON.stringify(comparisons);
+  const lines = [];
+  const originalLog = console.log;
+  console.log = line => lines.push(line);
+  try {
+    require('../src/tapdata-api-verification').printReport({ passed: false, comparisons }, {});
+  } finally { console.log = originalLog; }
+  for (const value of ['40000.00', '9007199254740993.01', '600.00']) {
+    assert.ok(lines.some(line => line.split(value).length === 3 && line.endsWith('PASS')));
+  }
+  assert.ok(lines.some(line => line.includes('-2.50') && line.includes('MISSING API FIELD/RECORD') && line.endsWith('FAIL')));
+  assert.equal(JSON.stringify(comparisons), before);
+});
+
+test('verification table keeps API and result columns aligned with long transaction IDs', () => {
+  const id = 'RT-13e93b4f-322f-444d-8264-67ed8a8f2a24';
+  const lines = [];
+  const originalLog = console.log;
+  console.log = line => lines.push(line);
+  try {
+    require('../src/tapdata-api-verification').printReport({ passed: false, comparisons: [
+      { group: 'transaction', field: 'Transaction ID', source: id, api: id, passed: true },
+      { group: 'transaction', field: 'Currency', source: 'GBP', api: 'USD', passed: false }
+    ] }, { customerId: '100002', accountId: 'AC1000021' });
+  } finally { console.log = originalLog; }
+  const section = lines.indexOf('TRANSACTION COMPARISON (AS400 vs TapData API)');
+  const header = lines.slice(section).find(line => line.startsWith('FIELD'));
+  const longRow = lines.find(line => line.startsWith('Transaction ID'));
+  const shortRow = lines.find(line => line.startsWith('Currency'));
+  const shortId = id.slice(0, 26) + '...';
+  assert.equal(longRow.indexOf(shortId, longRow.indexOf(shortId) + shortId.length), header.indexOf('TAPDATA API'));
+  assert.equal(shortRow.indexOf('USD'), header.indexOf('TAPDATA API'));
+  assert.equal(longRow.lastIndexOf('PASS'), header.indexOf('RESULT'));
+  assert.equal(shortRow.lastIndexOf('FAIL'), header.indexOf('RESULT'));
+  assert.ok(lines.some(line => line.includes('Source DB   : ' + id)));
+  assert.ok(lines.some(line => line.includes('TapData API : ' + id)));
+  assert.ok(lines.every(line => line.length <= 100));
+});
+
 const source = {
   customerId: '100002', accountId: 'AC1000021', balance: 3381.32, availableBalance: 3281.32, currency: 'GBP',
   transaction: { id: 'RT-04a1932f-1234-4234-9234-123456789012', amount: 200, currency: 'GBP', type: 'WITHDRAWAL', stage: 'POSTED', status: 'COMPLETED' },

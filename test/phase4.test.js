@@ -121,9 +121,10 @@ test('KYC update and reset preserve local prompts/output; remote cancellations s
     assert.equal(remote.status, 0, remote.stderr); assert.equal(local.status, 0, local.stderr);
     assert.equal(remote.stdout, local.stdout);
     assert.match(remote.stderr, /HTTP POST/);
-    for (const answer of ['n', '', 'no', 'maybe']) {
+    for (const answer of ['N', 'n', '', 'no', 'maybe']) {
       const cancelled = cli({ command, answer });
-      assert.equal(cancelled.status, 0, cancelled.stderr); assert.match(cancelled.stdout, /cancelled/);
+      assert.equal(cancelled.status, 0, cancelled.stderr);
+      assert.match(cancelled.stdout, command === 'kyc' ? /^Cancelled\. No changes were made\.$/m : /cancelled/);
       assert.doesNotMatch(cancelled.stderr, /HTTP POST|FORBIDDEN/);
     }
   }
