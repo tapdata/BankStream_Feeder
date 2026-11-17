@@ -76,7 +76,7 @@ DEMO_API_TIMEOUT_MS=150000
 Partners complete these steps. Import files are in `tapdata_tasks/`.
 
 1. In TapData task import, import `replication-tasks_batch-20261023.json.gz`, then `transformation_tasks_batch-20261023.json.gz`. For both imports, under **Handling for Name Conflicts**, select **Reuse Existing**. This reuses existing connections when names conflict; a task with a conflicting name is replaced.
-2. Update the database connections and run **Test Connection** for DB2 for i, Oracle, and MongoDB (FDM and MDM).
+2. Run **Test Connection** for DB2 for i, Oracle, and MongoDB (FDM and MDM).
 3. Start replication in order: **AS400 to FDM**, **Oracle to FDM**, then **FDM to MDM**. Wait for each task initial synchronization before starting the next. In the transformation section, start `MDM_ACCOUNT_AND_TRANSACTIONS_CARDS` first, then `MDM_CUSTOMER360` once its input data is ready. Keep CDC running.
 4. Once MDM data is ready, open **Data Services > Api List > Import** and import `Tapdata_API_module_batch-20261023.json.gz`. Check connections and paths, publish the 13 APIs, and confirm they return demo records.
 
@@ -147,7 +147,7 @@ Run commands from the project folder after completing the TapData task and API s
 |---|---|
 | `npm run dry-run` | Checks both source database connections using read-only SELECT queries. |
 | `npm run demo:status` | Displays customer, account, transaction, and KYC details without changing data. |
-| `npm run demo:transaction` | Previews the account and asks for a GBP withdrawal amount and confirmation. Inserts a completed withdrawal and reduces balance and available balance. |
+| `npm run demo:transaction` | Previews the account and asks for a GBP/USD/AUD withdrawal amount and confirmation. Inserts a completed withdrawal and reduces balance and available balance. |
 | `npm run demo:kyc` | Shows current KYC and asks for confirmation before setting status/risk to `REVIEW_REQUIRED / HIGH`, if needed. |
 | `npm run demo:reset` | Offers KYC reset, balance reset, both, or cancel. Reads current values after selection and confirms only necessary changes. Restores KYC to `VERIFIED / LOW` and/or both balances to `40000`. Keeps transaction history. |
 | `npm run demo:verify` | Reads source transactions/KYC and compares source balances, transactions, and KYC with TapData published APIs. Reports PASS/FAIL without changing data. |
