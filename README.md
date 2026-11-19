@@ -13,7 +13,7 @@ cd BankStream_Feeder
 
 ## 2. Choose Deployment Mode
 
-- **Remote Mode (recommended for partners):** TapData provides the databases and service. Skip database setup and follow [Remote Mode](#remote-mode-recommended-for-partners).
+- **Remote Mode (recommended for partners):** TapData provides the databases, service, and a preconfigured TapData account. Skip database and TapData task setup and follow [Remote Mode](#remote-mode-recommended-for-partners).
 - **Local Mode:** you manage your own Oracle and IBM i databases. Complete the database setup below first, then follow [Local Mode](#local-mode).
 
 ### Local Mode only: create databases, schemas, and demo records first
@@ -34,6 +34,8 @@ The supplied scripts use `BANKCORE` for IBM i and `C##BANKCRM` for Oracle. Use t
 ## Remote Mode (recommended for partners)
 
 The CLI connects to the TapData-hosted Control Service. The service uses your partner's assigned databases and keeps database and TapData credentials on the server. You do not need your own database installation.
+
+TapData provides a preconfigured TapData account with pipelines already imported and running and the Customer 360 and KYC APIs already published. TapData task setup is not required in Remote Mode.
 
 
 ### 1. Install
@@ -66,25 +68,12 @@ Edit these three settings in `.env` using your assigned service URL and partner 
 
 ```ini
 FEEDER_MODE=remote
-DEMO_API_URL=https://127.0.0.1:8443
+DEMO_API_URL=https://113.98.206.139:8443
 DEMO_API_TOKEN=<partner-token>
 DEMO_API_TIMEOUT_MS=150000
 ```
 
-### 3. TapData task setup
-
-Partners complete these steps. Import files are in `tapdata_tasks/`.
-
-1. In TapData task import, import `replication-tasks_batch-20261023.json.gz`, then `transformation_tasks_batch-20261023.json.gz`. For both imports, under **Handling for Name Conflicts**, select **Reuse Existing**. This reuses existing connections when names conflict; a task with a conflicting name is replaced.
-2. Run **Test Connection** for DB2 for i, Oracle, and MongoDB (FDM and MDM).
-3. Start replication in order: **AS400 to FDM**, **Oracle to FDM**, then **FDM to MDM**. Wait for each task initial synchronization before starting the next. In the transformation section, start `MDM_ACCOUNT_AND_TRANSACTIONS_CARDS` first, then `MDM_CUSTOMER360` once its input data is ready. Keep CDC running.
-4. Once MDM data is ready, open **Data Services > Api List > Import** and import `Tapdata_API_module_batch-20261023.json.gz`. Check connections and paths, publish the 13 APIs, and confirm they return demo records.
-
-![TapData Task Import dialog with Reuse Existing selected for Remote Mode](docs/images/tapdata-task-import.png)
-
-### 4. Check the connection
-
-Before running `npm run demo:status`, `npm run demo:transaction`, or the other demo commands, confirm that the required TapData tasks have completed their initial synchronization, CDC tasks are running, and the Customer 360 and KYC APIs are published and accessible.
+### 3. Check the connection
 
 ```bash
 npm test
@@ -126,6 +115,8 @@ Partners complete these steps. Import files are in `tapdata_tasks/`.
 3. Start replication in order: **AS400 to FDM**, **Oracle to FDM**, then **FDM to MDM**. Wait for each task initial synchronization before starting the next. In the transformation section, start `MDM_ACCOUNT_AND_TRANSACTIONS_CARDS` first, then `MDM_CUSTOMER360` once its input data is ready. Keep CDC running.
 4. Once MDM data is ready, open **Data Services > Api List > Import** and import `Tapdata_API_module_batch-20261023.json.gz`. Check connections and paths, publish the 13 APIs, and confirm they return demo records.
 
+![TapData Task Import dialog with Reuse Existing selected for Remote Mode](docs/images/tapdata-task-import.png)
+
 ### 4. Check the connection and demo records
 
 ```bash
@@ -141,7 +132,7 @@ Configure TapData tasks first. Before running `npm run demo:transaction`, or the
 
 ## Demo commands
 
-Run commands from the project folder after completing the TapData task and API setup above. All commands below work in both modes.
+Run commands from the project folder after completing the steps for your deployment mode. All commands below work in both modes.
 
 | Command | What it does |
 |---|---|
