@@ -7,7 +7,7 @@ The Feeder changes source data and verifies results. It does not create schemas 
 ## 1. Clone the Project
 
 ```bash
-git clone https://github.com/umerwhu/BankStream_Feeder.git
+git clone https://github.com/tapdata/BankStream_Feeder.git
 cd BankStream_Feeder
 ```
 
