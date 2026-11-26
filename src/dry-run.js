@@ -1,4 +1,4 @@
-async function dryRun({ connectOracle, connectDb2, log = console.log, errorLog = console.error, formatError = error => error.message }) {
+async function dryRun({ connectOracle, connectDb2, log = console.log, errorLog = console.error, formatError = error => error.message, loading = (_message, action) => action() }) {
   let failed = false;
   const color = (code, text, stream = process.stdout) =>
     stream.isTTY && !('NO_COLOR' in process.env) ? `\x1b[${code}m${text}\x1b[0m` : text;
@@ -13,15 +13,17 @@ async function dryRun({ connectOracle, connectDb2, log = console.log, errorLog =
   ]) {
     let connection;
     try {
-      connection = await connect();
-      await check(connection);
+      await loading('Checking ' + label + ' connectivity...', async () => {
+        connection = await connect();
+        await check(connection);
+      });
       log(`  ${color('1;32', '[PASS]')} ${color('1', label.padEnd(12))} Connection and query verified`);
     } catch (error) {
       failed = true;
       errorLog(color('31', `  [FAIL] ${label.padEnd(12)} ${formatError(error)}`, process.stderr));
     } finally {
       if (connection) {
-        try { await connection.close(); } catch (error) {
+        try { await loading('Closing ' + label + ' connection...', () => connection.close()); } catch (error) {
           failed = true;
           errorLog(color('31', `${label} close: FAILED (${formatError(error)})`, process.stderr));
         }
