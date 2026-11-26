@@ -2,6 +2,7 @@ const crypto = require('node:crypto');
 const { runSchedule } = require('./scheduler');
 const { createExecutionSummary, printExecutionSummary } = require('./execution-summary');
 function createRealtimeService(settings, { signal, log = console.log, progress = () => {}, coordinate = action => action(),
+  loading = (_message, action) => action(),
   stopOnError = false, formatError = error => error.message, onIntent = async () => {}, detailedEvents = false } = {}) {
 const config = structuredClone(settings);
 config.retryLimit ??= 5;
@@ -43,7 +44,7 @@ async function oracleWrite(summary, table, operation, key, label, execute) {
 
 async function retry(label, operation) {
   for(let attempt=0;;attempt++) {
-    try { return await operation(); }
+    try { return await loading('Processing ' + label + '...', operation); }
     catch(error) {
       if(attempt>=config.retryLimit || !retryable(error)) throw error;
       const delay=Math.min(1000*2**attempt,10000);
@@ -163,7 +164,7 @@ async function updateOracle(oracle,customer,customerProfileId,eventKey,summary) 
 
 async function recoverPending(db2,summary) {
   let rows;
-  try { rows=await db2.query(`SELECT TRANSACTION_ID,ACCOUNT_ID,TRANSACTION_TYPE,TRANSACTION_AMOUNT,CURRENCY,COUNTERPARTY_REFERENCE FROM ${db2Table('ACCOUNT_TRANSACTION')} WHERE TRANSACTION_STATUS='PENDING' ORDER BY TRANSACTION_TIMESTAMP FETCH FIRST 1 ROW ONLY`); }
+  try { rows=await loading('Checking for pending Db2 transactions...', () => db2.query(`SELECT TRANSACTION_ID,ACCOUNT_ID,TRANSACTION_TYPE,TRANSACTION_AMOUNT,CURRENCY,COUNTERPARTY_REFERENCE FROM ${db2Table('ACCOUNT_TRANSACTION')} WHERE TRANSACTION_STATUS='PENDING' ORDER BY TRANSACTION_TIMESTAMP FETCH FIRST 1 ROW ONLY`)); }
   catch(error) { recordFailure(summary,error,{schema:DB2_SCHEMA,table:'ACCOUNT_TRANSACTION',operation:'SELECT'}); throw error; }
   if(!rows.length) return 0;
   const row=rows[0];
@@ -213,7 +214,7 @@ async function realtime(db2,oracle,options={}) {
     onSuccess: row => { if (detailedEvents) log(`Source ${row.schema}.${row.table} ${row.operation} rows=${row.rows}`); progress(summary); } });
   try {
     progress(summary);
-    const records=await loadWorkloadRecords(db2,oracle,summary);
+    const records=await loading('Reading workload accounts and customer profiles...', () => loadWorkloadRecords(db2,oracle,summary));
     log('Workload currencies: ' + supportedCurrencies.filter(currency=>records.some(row=>row.currency===currency)).join(', ') + ' (existing matching accounts only).');
     log('Real-time workload started. Ctrl+C to stop.');
     const deadline = Date.now() + (options.durationMs ?? Infinity);

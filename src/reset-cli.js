@@ -1,5 +1,6 @@
 'use strict';
 require('dotenv').config();
+const { withLoading } = require('./loading');
 const { createInterface } = require('node:readline/promises');
 const { getExecutionMode } = require('./execution-mode');
 const { createDemoReset } = require('./demo-reset');
@@ -83,8 +84,8 @@ async function main() {
       }
       return adapter;
     };
-    const report = await runResetCommand({ preview: operation => initialize().preview(operation),
-      execute: (preview, operation) => initialize().execute(preview, operation), ask: question => prompt.question(question) });
+    const report = await runResetCommand({ preview: operation => withLoading('Reading current values for the demo reset...', () => initialize().preview(operation)),
+      execute: (preview, operation) => withLoading('Applying and verifying the demo reset...', () => initialize().execute(preview, operation)), ask: question => prompt.question(question) });
     if (report && !report.passed) process.exitCode = 1;
   } finally { prompt.close(); }
 }

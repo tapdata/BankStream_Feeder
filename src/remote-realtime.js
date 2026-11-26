@@ -6,21 +6,21 @@ const TERMINAL = new Set(['Completed', 'Completed with errors', 'Failed']);
 const pollingInterval = (status, minimum) => Math.max(minimum,
   Number.isSafeInteger(status.pollIntervalMs) && status.pollIntervalMs >= 1000 && status.pollIntervalMs <= 60000 ? status.pollIntervalMs : 0);
 
-async function runRemoteRealtime({ client, options, signals = process, log = console.log, pollMs = 2000 }) {
+async function runRemoteRealtime({ client, options, signals = process, log = console.log, pollMs = 2000, loading = (_message, action) => action() }) {
   const settings = validateHostedRealtimeOptions(options);
   const idempotencyKey = randomUUID();
   let jobId, cursor = 0, stopping = false, stopSent = false, wake;
   const stop = () => { stopping = true; wake?.(); };
   signals.on('SIGINT', stop); signals.on('SIGTERM', stop);
   try {
-    const started = await client.execute('realtimeStart', { options: settings, idempotencyKey });
+    const started = await loading('Starting the remote realtime workload...', () => client.execute('realtimeStart', { options: settings, idempotencyKey }));
     jobId = started.jobId;
     log(`Hosted realtime job: ${jobId}`);
     while (true) {
       if (stopping && !stopSent) {
         stopSent = true;
         try {
-          const stopped = await client.execute('realtimeStop', { jobId });
+          const stopped = await loading('Stopping the remote realtime workload...', () => client.execute('realtimeStop', { jobId }));
           // Ctrl+C wakes the normal polling delay. Honor the server limit before
           // polling again, retaining the cursor so final output is not skipped.
           await new Promise(resolve => setTimeout(resolve, pollingInterval(stopped, pollMs)));
@@ -28,7 +28,7 @@ async function runRemoteRealtime({ client, options, signals = process, log = con
         catch { throw new Error(`Stop request failed; job ${jobId} may still be running`); }
       }
       let status;
-      try { status = await client.execute('realtimeStatus', { jobId, cursor }); }
+      try { status = await loading('Checking remote realtime workload progress...', () => client.execute('realtimeStatus', { jobId, cursor })); }
       catch { throw new Error(`Unable to poll job ${jobId}; it may still be running`); }
       if (status.truncated) log('Some older realtime output expired from the server buffer.');
       for (const event of status.events) {

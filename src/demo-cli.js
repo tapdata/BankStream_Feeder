@@ -1,4 +1,5 @@
 require('dotenv').config();
+const { withLoading } = require('./loading');
 const { createInterface } = require('node:readline/promises');
 const { stdin, stdout } = require('node:process');
 const { getExecutionMode } = require('./execution-mode');
@@ -44,10 +45,10 @@ async function confirmWithdrawal() {
   return false;
 }
 
-async function withConnection(connect, action) {
-  const connection = await connect();
+async function withConnection(database, connect, action) {
+  const connection = await withLoading('Connecting to ' + database + '...', connect);
   try { return await action(connection); }
-  finally { await connection.close(); }
+  finally { await withLoading('Closing ' + database + ' connection...', () => connection.close()); }
 }
 
 function printStatus(result) {
@@ -75,7 +76,7 @@ async function runWithdrawal(account, submit) {
     return;
   }
   let result;
-  try { result = await submit(formatMinorUnits(amountCents)); }
+  try { result = await withLoading('Submitting withdrawal...', () => submit(formatMinorUnits(amountCents))); }
   catch (error) {
     if (error.withdrawalExecution) {
       output.failure(error.withdrawalExecution);
@@ -108,7 +109,7 @@ async function runKyc(mode, adapter) {
       return;
     }
     let result;
-    try { result = await adapter.setKyc(preview); }
+    try { result = await withLoading('Updating KYC status and risk rating...', () => adapter.setKyc(preview)); }
     catch (error) { output.failure(error.kycExecution); throw error; }
     output.result(result);
     return;
@@ -126,7 +127,7 @@ async function runKyc(mode, adapter) {
       console.log('KYC reset cancelled; no database changes were made.');
       return;
     }
-    const reset = await adapter.resetKyc(current);
+    const reset = await withLoading('Resetting KYC status...', () => adapter.resetKyc(current));
     const final = await adapter.finalKyc();
     const matches = final.status === 'VERIFIED' && final.riskRating === 'LOW';
     console.log(reset.changed ? `KYC reset ${matches ? 'PASS' : 'FAIL'}.` : `No reset needed (${matches ? 'PASS' : 'FAIL'}).`);
@@ -143,14 +144,15 @@ async function main(mode) {
     if (mode !== 'verify' && process.argv.length > 3) throw new Error(`Usage: npm run demo:${mode}`);
     const { createRemoteClient } = require('./remote-client');
     const client = createRemoteClient();
-    if (mode === 'status') printStatus(await client.execute('status'));
+    if (mode === 'status') printStatus(await withLoading('Fetching demo account and KYC status...', () => client.execute('status')));
     else if (mode === 'verify') {
-      const report = await client.execute('verify', parseVerificationArgs(process.argv.slice(3)));
+      const options = parseVerificationArgs(process.argv.slice(3));
+      const report = await withLoading('Verifying demo records through the Control Service...', () => client.execute('verify', options));
       printVerification(report);
       if (!report.passed) process.exitCode = 1;
     } else if (mode === 'kyc' || mode === 'kyc:reset') {
       let preview;
-      try { preview = await client.execute('kycPreview'); }
+      try { preview = await withLoading('Fetching current KYC status...', () => client.execute('kycPreview')); }
       catch (error) {
         if (mode === 'kyc') require('./kyc-output').failure(error.kycExecution);
         throw error;
@@ -162,7 +164,7 @@ async function main(mode) {
         finalKyc: async () => result.final
       });
     } else {
-      const preview = await client.execute('transactionPreview');
+      const preview = await withLoading('Fetching withdrawal account and balance...', () => client.execute('transactionPreview'));
       await runWithdrawal(preview.account, amount => client.execute('transaction', {
         amount, previewId: preview.previewId, confirmed: true,
         idempotencyKey: require('node:crypto').randomUUID()
@@ -174,14 +176,15 @@ async function main(mode) {
   if (mode === 'status') {
     const { withSource } = require('./status-output');
     await withSource(() => connectDb2(config), 'AS400', async db2 => {
-      await withSource(() => connectOracle(config), 'Oracle', async oracle => printStatus(await service.status(db2, oracle, true)));
-    });
+      await withSource(() => connectOracle(config), 'Oracle', async oracle =>
+        printStatus(await withLoading('Reading account and KYC status...', () => service.status(db2, oracle, true))), withLoading);
+    }, withLoading);
     return;
   }
   if (mode === 'transaction') {
-    await withConnection(() => connectDb2(config), async db2 => {
+    await withConnection('Db2', () => connectDb2(config), async db2 => {
       try {
-        const account = await service.readWithdrawalAccount(db2, true);
+        const account = await withLoading('Reading withdrawal account and balance...', () => service.readWithdrawalAccount(db2, true));
         await runWithdrawal(account, amount => service.transaction(db2, amount, true, account.currency));
       } catch (error) {
         throw error;
@@ -190,18 +193,21 @@ async function main(mode) {
     return;
   }
   if (['kyc', 'kyc:reset'].includes(mode)) {
-    await withConnection(() => connectOracle(config), oracle => runKyc(mode, {
-      currentKyc: () => mode === 'kyc'
-        ? require('./kyc-output').observe(oracle, connection => service.currentKyc(connection)) : service.currentKyc(oracle),
+    await withConnection('Oracle', () => connectOracle(config), oracle => runKyc(mode, {
+      currentKyc: () => withLoading('Reading current KYC status from Oracle...', () => mode === 'kyc'
+        ? require('./kyc-output').observe(oracle, connection => service.currentKyc(connection)) : service.currentKyc(oracle)),
       setKyc: preview => require('./kyc-output').observe(oracle, connection => service.setKyc(connection, preview)),
-      resetKyc: current => service.resetKyc(oracle, current), finalKyc: () => service.currentKyc(oracle)
+      resetKyc: current => service.resetKyc(oracle, current), finalKyc: () => withLoading('Checking final KYC status...', () => service.currentKyc(oracle))
     }));
     return;
   }
   if (mode === 'verify') {
     const { withSource } = require('./status-output');
-    const report = await runVerification({ service, withDb2: action => withSource(() => connectDb2(config), 'AS400', action),
-      withOracle: action => withSource(() => connectOracle(config), 'Oracle', action), env: process.env }, parseVerificationArgs(process.argv.slice(3)));
+    const options = parseVerificationArgs(process.argv.slice(3));
+    const message = options.stage === 'api' || !options.stage ? 'Comparing source records with TapData...' : 'Verifying source ' + options.stage + ' records...';
+    const report = await withLoading(message, () => runVerification({ service,
+      withDb2: action => withSource(() => connectDb2(config), 'AS400', action),
+      withOracle: action => withSource(() => connectOracle(config), 'Oracle', action), env: process.env }, options));
     printVerification(report);
     if (!report.passed) process.exitCode = 1;
     return;

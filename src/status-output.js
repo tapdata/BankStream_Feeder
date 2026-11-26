@@ -74,11 +74,11 @@ function render(result) {
   return true;
 }
 function mark(error, source) { if (!error.sourceSystem) error.sourceSystem = source; return error; }
-async function withSource(connect, source, action) {
+async function withSource(connect, source, action, loading = (_message, operation) => operation()) {
   let connection;
-  try { connection = await connect(); } catch (error) { throw mark(error, source); }
+  try { connection = await loading('Connecting to ' + source + '...', connect); } catch (error) { throw mark(error, source); }
   try { return await action(connection); }
-  finally { try { await connection.close(); } catch (error) { throw mark(error, source); } }
+  finally { try { await loading('Closing ' + source + ' connection...', () => connection.close()); } catch (error) { throw mark(error, source); } }
 }
 function failure(error, remote = false) {
   const source = ['AS400', 'Oracle'].includes(error.sourceSystem) ? error.sourceSystem : remote ? 'Remote service' : 'Source system';
